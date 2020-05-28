@@ -1,10 +1,330 @@
+"""
+This code extracts the MD&A sections from 10K financial statements.  The list of paths for the respective 10K's
+are obtained from the SEC's master files giving paths to all of the public documents that are filed with the SEC
+in each quarter.  The repository includes that actual download links (i.e. downloadindex.sas7bdat and downloadlist.txt) 
+that we use in our study.  Our links include all filings classified as '10-K','10-K/A','10-K405/A','10-K405','10-KSB',
+'10-KSB/A','10KSB','10KSB/A','10KSB40','10KSB40/A' from 2002 to 2016. 
+"""
 
-with open(address, 'r', encoding='UTF-8', errors='ignore') as myfile:
-        document = myfile.read()
-    # doc_len = len(doc)
-    document = re.sub('(May|MAY)', ' ', document)  # drop all May month references
-    p = document.upper()  # for this parse caps aren't informative so shift
-######Remove <DIV>, <TR>, <TD>, and <FONT>##########################
+import csv
+import requests
+import re
+import os
+
+######################################################################################
+######################################################################################
+# This section is for functions that are used throughout the scrape
+######################################################################################
+######################################################################################
+
+########################## Obtain file Information ###################################
+def parse(file1, file2):
+    hand=open(file1)
+    IDENTITY=""
+    for line in hand:
+        line=line.strip()
+        if re.findall('^COMPANY CONFORMED NAME:',line):
+            k = line.find(':')
+            comnam=line[k+1:]
+            comnam=comnam.strip()
+            IDENTITY='<HEADER>\nCOMPANY NAME: '+str(comnam)+'\n'                                         
+            break
+        
+    hand=open(file1)
+    for line in hand:
+        line=line.strip()
+        if re.findall('^CENTRAL INDEX KEY:',line):
+            k = line.find(':')
+            cik=line[k+1:]
+            cik=cik.strip()
+            #print cik
+            IDENTITY=IDENTITY+'CIK: '+str(cik)+'\n'
+            break
+        
+    hand=open(file1)
+    for line in hand:
+        line=line.strip()
+        if re.findall('^STANDARD INDUSTRIAL CLASSIFICATION:',line):
+            k = line.find(':')
+            sic=line[k+1:]
+            sic=sic.strip()
+            siccode=[]
+            for s in sic: 
+                if s.isdigit():
+                    siccode.append(s)    
+            #print siccode
+            IDENTITY=IDENTITY+'SIC: '+''.join(siccode)+'\n'
+            break
+        
+    hand=open(file1)
+    for line in hand:
+        line=line.strip()
+        if re.findall('^CONFORMED SUBMISSION TYPE:',line):
+            k = line.find(':')
+            subtype=line[k+1:]
+            subtype=subtype.strip()
+            #print subtype
+            IDENTITY=IDENTITY+'FORM TYPE: '+str(subtype)+'\n'
+            break
+            
+    hand=open(file1)
+    for line in hand:
+        line=line.strip()
+        if re.findall('^CONFORMED PERIOD OF REPORT:',line):
+            k = line.find(':')
+            cper=line[k+1:]
+            cper=cper.strip()
+            #print cper
+            IDENTITY=IDENTITY+'REPORT PERIOD END DATE: '+str(cper)+'\n'
+            break
+            
+    hand=open(file1)
+    for line in hand:
+        line=line.strip()
+        if re.findall('^FILED AS OF DATE:',line):
+            k = line.find(':')
+            fdate=line[k+1:]
+            fdate=fdate.strip()
+            #print fdate                                
+            IDENTITY=IDENTITY+'FILE DATE: '+str(fdate)+'\n'+'</HEADER>\n'
+            break
+            
+    with open(file2, 'a') as f:
+        f.write(str(IDENTITY))
+        f.close()
+    hand.close()
+
+###########################  DELETE HEADER INFORMATION  #######################################
+
+def headerclean(temp, temp1):
+    mark0=0
+    strings1=['</SEC-HEADER>','</IMS-HEADER>']
+    hand=open(temp)
+    hand.seek(0)
+    for x, line in enumerate(hand):
+        line=line.strip()
+        if any(s in line for s in strings1):
+            mark0=x
+            break
+    hand.seek(0)
+    
+    newfile=open(temp1,'w')
+    for x, line in enumerate(hand):
+        if x>mark0:
+            newfile.write(line)
+    hand.close()
+    newfile.close()
+    
+    newfile=open(temp1,'r')
+    hand=open(temp,'w')        
+    for line in newfile:
+        if "END PRIVACY-ENHANCED MESSAGE" not in line:
+            hand.write(line)                
+    hand.close()                
+    newfile.close()
+
+###########################  XBRL Cleaner  ###################################################
+
+def xbrl_clean(cond1, cond2, str0):
+    locations=[0]
+    #print locations
+    placement1=[]
+    str0=str0.lower()
+    for m in re.finditer(cond1, str0):
+        a=m.start()
+        placement1.append(a)
+    #print placement1
+    
+    if placement1!=[]:
+        placement2=[]
+        for m in re.finditer(cond2, str0):
+            a=m.end()
+            placement2.append(a)
+    #    print placement2
+        
+        len1=len(placement1)
+        placement1.append(len(str0))
+        
+        for i in range(len1):
+            placement3=[]
+            locations.append(placement1[i])
+            for j in placement2:
+                if (j>placement1[i] and j<placement1[i+1]):
+                    placement3.append(j)
+                    break
+            if placement3!=[]:
+                locations.append(placement3[0])
+            else:
+                locations.append(placement1[i])
+    
+    #print locations
+    return locations
+
+###########################  Table Cleaner  ###################################################
+
+def table_clean(cond1, cond2, str1):
+    Items0=["item 7", "item7", "item8", "item 8"]
+    Items1=["item 1", "item 2","item 3","item 4","item 5","item 6","item 9", "item 10", "item1", "item2","item3","item4","item5","item6","item9", "item10"]
+    
+    str2=str1.lower()
+    placement1=[]
+    for m in re.finditer(cond1, str2):
+        a=m.start()
+        placement1.append(a)
+    n=len(placement1)
+    placement1.append(len(str2))
+    
+    placement2=[]
+    for m in re.finditer(cond2, str2):
+        a=m.end()
+        placement2.append(a)
+        
+    if (placement1!=[] and placement2!=[]):
+        current=str1[0:placement1[0]]
+        
+        for i in range(n):
+            begin=placement1[i]
+            for j in placement2:
+                if j>begin:
+                    end=j
+                    break
+            
+            if end=="":
+                current=current+str1[begin:placement1[i+1]]
+            else:
+                str2=""
+                str2=str1[begin:end].lower()
+                str2=str2.replace("&nbsp;"," ")
+                str2=str2.replace("&NBSP;"," ")
+                p = re.compile(r'&#\d{1,5};')
+                str2=p.sub("",str2)
+                p = re.compile(r'&#.{1,5};')
+                str2=p.sub("",str2)
+                if any(s in str2 for s in Items0):
+                    if not any(s in str2 for s in Items1):
+                        current=current+str2
+                    
+                current=current+str1[end:placement1[i+1]]
+                end=""
+    else:
+        current=str1
+    return current
+    
+###############################################################################################
+###############################################################################################
+# This section is the actual program
+###############################################################################################
+###############################################################################################
+'''
+This is the filepath of where you would like the text files of possible MD&A sections to be saved.  It is also the location of the downloadlist.txt file
+that includes all of the filing links.
+'''
+filepath="C:\\Users\\rdf0969\\Documents\\Financial Statement Data"   
+
+###############################################################################
+#This is the master download file that include all of the links to SEC filings.
+###############################################################################
+download=os.path.join(filepath,"downloadlist.txt")
+
+
+#############################################################################################################
+#The are just hosting text files that can be ignored.  You need them to recored the data as the program runs.
+#############################################################################################################
+temp=os.path.join(filepath,"temp.txt")
+temp1=os.path.join(filepath,"newfile.txt")
+
+#################################################################################
+#This is the file that records the number of sections for each respective filing.
+#################################################################################
+LOG=os.path.join(filepath,"DOWNLOADLOG.txt")
+with open(LOG,'w') as f:
+    f.write("Filer\tSECTIONS\n")
+    f.close()
+
+######## Download the filing ############
+with open(download, 'r') as txtfile:
+    reader = csv.reader(txtfile, delimiter=',')
+    for line in reader:
+        #print line
+        FileNUM=line[0].strip()
+        Filer=os.path.join(filepath, str(line[0].strip())+".txt")
+        url = 'https://www.sec.gov/Archives/' + line[1].strip()
+        with open(temp, 'w') as f:
+            f.write(requests.get('%s' % url).content)
+        f.close()
+        
+##### Obtain Header Information on Filing ######################        
+        
+        parse(temp, Filer)
+        headerclean(temp, temp1)
+        
+##### ASCII Section ######################        
+    
+        with open(temp,'r') as f:
+            str1=f.read()
+            output=str1
+            locations_xbrlbig=xbrl_clean("<type>zip", "</document>", output)
+            locations_xbrlbig.append(len(output))
+            
+            if locations_xbrlbig!=[]:
+                str1=""
+                if len(locations_xbrlbig)%2==0:
+                    for i in xrange(0,len(locations_xbrlbig),2):
+                        str1=str1+output[locations_xbrlbig[i]:locations_xbrlbig[i+1]]
+
+        f.close
+        output=str1
+        locations_xbrlbig=xbrl_clean("<type>graphic", "</document>", output)
+        locations_xbrlbig.append(len(output))
+        
+        if locations_xbrlbig!=[0]:
+            str1=""
+            if len(locations_xbrlbig)%2==0:
+                for i in xrange(0,len(locations_xbrlbig),2):
+                    str1=str1+output[locations_xbrlbig[i]:locations_xbrlbig[i+1]]
+        
+        output=str1
+        locations_xbrlbig=xbrl_clean("<type>excel", "</document>", output)
+        locations_xbrlbig.append(len(output))
+        
+        if locations_xbrlbig!=[0]:
+            str1=""
+            if len(locations_xbrlbig)%2==0:
+                for i in xrange(0,len(locations_xbrlbig),2):
+                    str1=str1+output[locations_xbrlbig[i]:locations_xbrlbig[i+1]]
+                    
+        output=str1
+        locations_xbrlbig=xbrl_clean("<type>pdf", "</document>", output)
+        locations_xbrlbig.append(len(output))
+        
+        if locations_xbrlbig!=[0]:
+            str1=""
+            if len(locations_xbrlbig)%2==0:
+                for i in xrange(0,len(locations_xbrlbig),2):
+                    str1=str1+output[locations_xbrlbig[i]:locations_xbrlbig[i+1]]
+        
+        output=str1
+        locations_xbrlbig=xbrl_clean("<type>xml", "</document>", output)
+        locations_xbrlbig.append(len(output))
+        
+        if locations_xbrlbig!=[0]:
+            str1=""
+            if len(locations_xbrlbig)%2==0:
+                for i in xrange(0,len(locations_xbrlbig),2):
+                    str1=str1+output[locations_xbrlbig[i]:locations_xbrlbig[i+1]]
+
+        output=str1
+        locations_xbrlbig=xbrl_clean("<type>ex", "</document>", output)
+        locations_xbrlbig.append(len(output))
+        
+        if locations_xbrlbig!=[0]:
+            str1=""
+            if len(locations_xbrlbig)%2==0:
+                for i in xrange(0,len(locations_xbrlbig),2):
+                    str1=str1+output[locations_xbrlbig[i]:locations_xbrlbig[i+1]]
+                    
+######Remove <DIV>, <TR>, <TD>, and <FONT>###########################
+                   
         p = re.compile(r'(<DIV.*?>)|(<DIV\n.*?>)|(<DIV\n\r.*?>)|(<DIV\r\n.*?>)|(<DIV.*?\n.*?>)|(<DIV.*?\n\r.*?>)|(<DIV.*?\r\n.*?>)')
         str1=p.sub("",str1)
         p = re.compile(r'(<div.*?>)|(<div\n.*?>)|(<div\n\r.*?>)|(<div\r\n.*?>)|(<div.*?\n.*?>)|(<div.*?\n\r.*?>)|(<div.*?\r\n.*?>)')
@@ -120,7 +440,7 @@ with open(address, 'r', encoding='UTF-8', errors='ignore') as myfile:
         str1=p.sub("",str1)
 
 ################################## MD&A Section #####################################################
-
+        
         item7={}
         item7[1]="item 7\. managements discussion and analysis"
         item7[2]="item 7\.managements discussion and analysis"
@@ -244,10 +564,10 @@ with open(address, 'r', encoding='UTF-8', errors='ignore') as myfile:
         
         locations={}
         if list2==[]:
-            print ("NO MD&A")
+            print "NO MD&A"
         else:
             if list1==[]:
-                print ("NO MD&A")
+                print "NO MD&A"
             else:
                 for k0 in range(len(list1)):
                     locations[k0]=[]
@@ -279,8 +599,6 @@ with open(address, 'r', encoding='UTF-8', errors='ignore') as myfile:
             with open(LOG,'a') as f:
                     f.write(str(FileNUM)+"\t"+str(sections)+"\n")
                     f.close()
-        print (FileNUM)
+        print FileNUM
      
-        
-
         
